@@ -17,7 +17,8 @@ cogs_list = [
     'cogs.biblioteca',
     'cogs.economia',
     'cogs.cronograma',
-    'cogs.loja'
+    'cogs.loja',
+    'cogs.config_comandos'
 ]
 for cog in cogs_list:
     try:

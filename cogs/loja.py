@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands
-import sqlite3
+import aiosqlite
 
 class ModalCriarHabilidade(discord.ui.Modal):
     def __init__(self, aluno_id):
@@ -14,20 +14,17 @@ class ModalCriarHabilidade(discord.ui.Modal):
         nome_hab = self.children[0].value.strip()
         desc_hab = self.children[1].value.strip()
         
-        conn = sqlite3.connect('escola.db')
-        cursor = conn.cursor()
-        
-        cursor.execute("INSERT OR IGNORE INTO biblioteca (nome, descricao, tipo, custo, custo_folego) VALUES (?, ?, ?, ?, ?)", 
-                      (nome_hab, desc_hab, "Habilidade", 0, 0))
-        
-        cursor.execute("SELECT id FROM biblioteca WHERE nome = ?", (nome_hab,))
-        hid = cursor.fetchone()[0]
-        
-        cursor.execute("INSERT INTO posses (aluno_id, conhecimento_id) VALUES (?, ?)", (self.aluno_id, hid))
-        cursor.execute("UPDATE alunos SET fichas_habilidade = fichas_habilidade - 1 WHERE id = ?", (self.aluno_id,))
-        
-        conn.commit()
-        conn.close()
+        async with aiosqlite.connect('escola.db') as db:
+            await db.execute("INSERT OR IGNORE INTO biblioteca (nome, descricao, tipo, custo, custo_folego) VALUES (?, ?, ?, ?, ?)", 
+                          (nome_hab, desc_hab, "Habilidade", 0, 0))
+            
+            async with db.execute("SELECT id FROM biblioteca WHERE nome = ?", (nome_hab,)) as cursor:
+                hid = (await cursor.fetchone())[0]
+            
+            await db.execute("INSERT INTO posses (aluno_id, conhecimento_id) VALUES (?, ?)", (self.aluno_id, hid))
+            await db.execute("UPDATE alunos SET fichas_habilidade = fichas_habilidade - 1 WHERE id = ?", (self.aluno_id,))
+            
+            await db.commit()
         
         await interaction.response.send_message(f"⚔️ **{nome_hab}** criada com sucesso! Verifique sua ficha.", ephemeral=True)
 
@@ -47,30 +44,25 @@ class ViewCompraAptidao(discord.ui.View):
     async def comprar_aptidao(self, interaction: discord.Interaction):
         nome_apt = self.select.values[0]
         
-        conn = sqlite3.connect('escola.db')
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT id, custo FROM biblioteca WHERE nome = ? AND tipo = 'Aptidão'", (nome_apt,))
-        apt = cursor.fetchone()
-        
-        cursor.execute("SELECT 1 FROM posses WHERE aluno_id = ? AND conhecimento_id = ?", (self.aluno_id, apt[0]))
-        if cursor.fetchone():
-            conn.close()
-            return await interaction.response.send_message("❌ Você já possui esta aptidão!", ephemeral=True)
+        async with aiosqlite.connect('escola.db') as db:
+            async with db.execute("SELECT id, custo FROM biblioteca WHERE nome = ? AND tipo = 'Aptidão'", (nome_apt,)) as cursor:
+                apt = await cursor.fetchone()
             
-        if self.fichas_apt > 0:
-            cursor.execute("UPDATE alunos SET fichas_aptidao = fichas_aptidao - 1 WHERE id = ?", (self.aluno_id,))
-            metodo_pago = "🎫 1 Ficha de Aptidão"
-        elif self.estrelas >= apt[1]:
-            cursor.execute("UPDATE alunos SET estrelas = estrelas - ? WHERE id = ?", (apt[1], self.aluno_id))
-            metodo_pago = f"⭐ {apt[1]} Estrelas"
-        else:
-            conn.close()
-            return await interaction.response.send_message(f"❌ Você não tem recursos suficientes. Custa {apt[1]}⭐ ou 1 Ficha.", ephemeral=True)
-            
-        cursor.execute("INSERT INTO posses (aluno_id, conhecimento_id) VALUES (?, ?)", (self.aluno_id, apt[0]))
-        conn.commit()
-        conn.close()
+            async with db.execute("SELECT 1 FROM posses WHERE aluno_id = ? AND conhecimento_id = ?", (self.aluno_id, apt[0])) as cursor:
+                if await cursor.fetchone():
+                    return await interaction.response.send_message("❌ Você já possui esta aptidão!", ephemeral=True)
+                    
+            if self.fichas_apt > 0:
+                await db.execute("UPDATE alunos SET fichas_aptidao = fichas_aptidao - 1 WHERE id = ?", (self.aluno_id,))
+                metodo_pago = "🎫 1 Ficha de Aptidão"
+            elif self.estrelas >= apt[1]:
+                await db.execute("UPDATE alunos SET estrelas = estrelas - ? WHERE id = ?", (apt[1], self.aluno_id))
+                metodo_pago = f"⭐ {apt[1]} Estrelas"
+            else:
+                return await interaction.response.send_message(f"❌ Você não tem recursos suficientes. Custa {apt[1]}⭐ ou 1 Ficha.", ephemeral=True)
+                
+            await db.execute("INSERT INTO posses (aluno_id, conhecimento_id) VALUES (?, ?)", (self.aluno_id, apt[0]))
+            await db.commit()
         
         await interaction.response.send_message(f"🌿 Você comprou **{nome_apt}** usando {metodo_pago}!", ephemeral=True)
 class ViewCompraAtributo(discord.ui.View):
@@ -95,22 +87,18 @@ class ViewCompraAtributo(discord.ui.View):
         if self.estrelas < self.custo_atributo:
             return await interaction.response.send_message(f"❌ Você precisa de **{self.custo_atributo}⭐** para subir um atributo.", ephemeral=True)
             
-        conn = sqlite3.connect('escola.db')
-        cursor = conn.cursor()
-        
-        cursor.execute(f"UPDATE alunos SET estrelas = estrelas - ?, {atributo} = {atributo} + 1 WHERE id = ?", 
-                      (self.custo_atributo, self.aluno_id))
-        
-        cursor.execute("SELECT corpo, mente, coracao, atributo_folego, folego_treino FROM alunos WHERE id = ?", (self.aluno_id,))
-        c, m, cora, attr_f, f_treino = cursor.fetchone()
-        
-        valor_base = c if attr_f == 'corpo' else (m if attr_f == 'mente' else cora)
-        novo_folego_max = 100 + (valor_base * 10) + f_treino
-        
-        cursor.execute("UPDATE alunos SET folego_atual = ? WHERE id = ?", (novo_folego_max, self.aluno_id))
-        
-        conn.commit()
-        conn.close()
+        async with aiosqlite.connect('escola.db') as db:
+            await db.execute(f"UPDATE alunos SET estrelas = estrelas - ?, {atributo} = {atributo} + 1 WHERE id = ?", 
+                          (self.custo_atributo, self.aluno_id))
+            
+            async with db.execute("SELECT corpo, mente, coracao, atributo_folego, folego_treino FROM alunos WHERE id = ?", (self.aluno_id,)) as cursor:
+                c, m, cora, attr_f, f_treino = await cursor.fetchone()
+            
+            valor_base = c if attr_f == 'corpo' else (m if attr_f == 'mente' else cora)
+            novo_folego_max = 100 + (valor_base * 10) + f_treino
+            
+            await db.execute("UPDATE alunos SET folego_atual = ? WHERE id = ?", (novo_folego_max, self.aluno_id))
+            await db.commit()
         
         await interaction.response.send_message(f"Você gastou {self.custo_atributo}⭐ e ganhou **+1 em {atributo.capitalize()}**!", ephemeral=True)
 
@@ -126,11 +114,9 @@ async def abrir_loja_interface(interaction: discord.Interaction, tipo: str, alun
         await interaction.response.send_modal(ModalCriarHabilidade(aluno_id))
         
     elif tipo == "Aptidões":
-        conn = sqlite3.connect('escola.db')
-        cursor = conn.cursor()
-        cursor.execute("SELECT nome, custo FROM biblioteca WHERE tipo = 'Aptidão'")
-        aptidoes = cursor.fetchall()
-        conn.close()
+        async with aiosqlite.connect('escola.db') as db:
+            async with db.execute("SELECT nome, custo FROM biblioteca WHERE tipo = 'Aptidão'") as cursor:
+                aptidoes = await cursor.fetchall()
         
         if not aptidoes:
             msg = "❌ Nenhuma aptidão cadastrada na loja ainda."
@@ -190,21 +176,16 @@ class ViewBotaoLoja(discord.ui.View):
         self.add_item(btn)
 
     async def clique_loja(self, interaction: discord.Interaction):
-        conn = sqlite3.connect('escola.db')
-        cursor = conn.cursor()
-        # Agora puxamos também o nome_personagem (índice 1) para a lista
-        cursor.execute("SELECT id, nome_personagem, fichas_aptidao, estrelas, fichas_habilidade FROM alunos WHERE owner_id = ?", (interaction.user.id,))
-        alunos = cursor.fetchall()
-        conn.close()
+        async with aiosqlite.connect('escola.db') as db:
+            async with db.execute("SELECT id, nome_personagem, fichas_aptidao, estrelas, fichas_habilidade FROM alunos WHERE owner_id = ?", (interaction.user.id,)) as cursor:
+                alunos = await cursor.fetchall()
         
         if not alunos:
             return await interaction.response.send_message("❌ Você não possui uma ficha registrada para acessar a loja.", ephemeral=True)
             
         if len(alunos) == 1:
-            # Se tiver só um, pula o menu e vai direto
             await abrir_loja_interface(interaction, self.tipo, alunos[0], is_edit=False)
         else:
-            # Se tiver mais de um, manda o menu de seleção
             view_selecao = ViewSelecionarPersonagem(self.tipo, alunos)
             await interaction.response.send_message("👥 **Múltiplos Personagens:** Selecione quem vai acessar o balcão.", view=view_selecao, ephemeral=True)
 

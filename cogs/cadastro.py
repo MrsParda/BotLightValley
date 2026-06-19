@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands
-import sqlite3
+import aiosqlite
 
 class DropdownAbas(discord.ui.Select):
     def __init__(self, view_perfil):
@@ -27,7 +27,6 @@ class PaginaPerfil(discord.ui.View):
         super().__init__(timeout=1000)
         self.personagens = personagens
         self.usuario = usuario_alvo
-        self.cursor = cursor
         
         self.char_index = 0
         self.item_index = 0 
@@ -39,32 +38,32 @@ class PaginaPerfil(discord.ui.View):
         self.boletim_char = {}
         self.materias_lista = []
         
-        self.carregar_conhecimentos()
         self.add_item(DropdownAbas(self))
         self.atualizar_botoes()
 
-    def carregar_conhecimentos(self):
+    async def carregar_conhecimentos(self):
         aluno_id = self.personagens[self.char_index][0]
-        self.cursor.execute('''
-            SELECT b.nome, b.descricao, b.tipo, b.custo_folego
-            FROM posses p 
-            JOIN biblioteca b ON p.conhecimento_id = b.id 
-            WHERE p.aluno_id = ?
-        ''', (aluno_id,))
-        todos = self.cursor.fetchall()
-        
-        self.habilidades_char = [item for item in todos if item[2] == 'Habilidade']
-        self.aptidoes_char = [item for item in todos if item[2] == 'Aptidão']
+        async with aiosqlite.connect('escola.db') as db:
+            async with db.execute('''
+                SELECT b.nome, b.descricao, b.tipo, b.custo_folego
+                FROM posses p 
+                JOIN biblioteca b ON p.conhecimento_id = b.id 
+                WHERE p.aluno_id = ?
+            ''', (aluno_id,)) as cursor:
+                todos = await cursor.fetchall()
+            
+            self.habilidades_char = [item for item in todos if item[2] == 'Habilidade']
+            self.aptidoes_char = [item for item in todos if item[2] == 'Aptidão']
 
-        self.cursor.execute('''
-            SELECT m.nome, t.nome
-            FROM boletim b
-            JOIN topicos t ON b.topico_id = t.id
-            JOIN materias m ON t.materia_id = m.id
-            WHERE b.aluno_id = ?
-        ''', (aluno_id,))
-        boletim_bruto = self.cursor.fetchall()
-        
+            async with db.execute('''
+                SELECT m.nome, t.nome
+                FROM boletim b
+                JOIN topicos t ON b.topico_id = t.id
+                JOIN materias m ON t.materia_id = m.id
+                WHERE b.aluno_id = ?
+            ''', (aluno_id,)) as cursor:
+                boletim_bruto = await cursor.fetchall()
+            
         self.boletim_char = {}
         for materia, topico in boletim_bruto:
             if materia not in self.boletim_char:
@@ -173,7 +172,7 @@ class PaginaPerfil(discord.ui.View):
         if self.aba_atual == "Geral" and self.char_index > 0:
             self.char_index -= 1
             self.item_index = 0
-            self.carregar_conhecimentos()
+            await self.carregar_conhecimentos()
         elif self.aba_atual != "Geral" and self.item_index > 0:
             self.item_index -= 1
             
@@ -185,7 +184,7 @@ class PaginaPerfil(discord.ui.View):
         if self.aba_atual == "Geral" and self.char_index < len(self.personagens) - 1:
             self.char_index += 1
             self.item_index = 0
-            self.carregar_conhecimentos()
+            await self.carregar_conhecimentos()
         elif self.aba_atual == "Conhecimento" and self.item_index < len(self.materias_lista):
             self.item_index += 1
         elif self.aba_atual == "Habilidades" and self.item_index < len(self.habilidades_char) - 1:
@@ -197,9 +196,9 @@ class PaginaPerfil(discord.ui.View):
         await interaction.response.edit_message(embed=self.gerar_embed(), view=self)
 
 class ModalNome(discord.ui.Modal):
-    def __init__(self, bot, cursor, conn, alvo):
+    def __init__(self, bot, alvo):
         super().__init__(title="Passo 1: Nome do Personagem")
-        self.bot, self.cursor, self.conn, self.alvo = bot, cursor, conn, alvo
+        self.bot, self.alvo = bot, alvo
         self.add_item(discord.ui.InputText(label="Nome do Personagem", placeholder="Ex: Elrian Montenegro"))
 
     async def callback(self, interaction: discord.Interaction):
@@ -208,15 +207,17 @@ class ModalNome(discord.ui.Modal):
             'origem_data': None, 'pontos': {"corpo": 0, "mente": 0, "coracao": 0}, 
             'aptidoes': [], 'atributo_folego': None
         }
-        view = ViewOrigem(self.bot, self.cursor, self.conn, dados_ficha)
+        async with aiosqlite.connect('escola.db') as db:
+            async with db.execute("SELECT nome, categoria, atributo_bonus, descricao FROM origens") as cursor:
+                origens = await cursor.fetchall()
+        
+        view = ViewOrigem(self.bot, dados_ficha, origens)
         await interaction.response.send_message(f"✨ Criando **{dados_ficha['nome']}**\n\n**Passo 2:** Selecione a Origem do seu personagem.", view=view, ephemeral=True)
 class ViewOrigem(discord.ui.View):
-    def __init__(self, bot, cursor, conn, dados_ficha):
+    def __init__(self, bot, dados_ficha, origens):
         super().__init__(timeout=600)
-        self.bot, self.cursor, self.conn, self.df = bot, cursor, conn, dados_ficha
+        self.bot, self.df = bot, dados_ficha
         
-        self.cursor.execute("SELECT nome, categoria, atributo_bonus, descricao FROM origens")
-        origens = self.cursor.fetchall()
         if origens:
             options = [discord.SelectOption(label=o[0], description=f"{o[1]} | Bônus: {o[2]}") for o in origens]
             sel = discord.ui.Select(placeholder="Escolha sua Origem...", options=options)
@@ -225,21 +226,22 @@ class ViewOrigem(discord.ui.View):
 
     async def selecionar(self, interaction: discord.Interaction):
         nome_origem = interaction.data['values'][0]
-        self.cursor.execute("SELECT * FROM origens WHERE nome = ?", (nome_origem,))
-        self.df['origem_data'] = self.cursor.fetchone()
+        async with aiosqlite.connect('escola.db') as db:
+            async with db.execute("SELECT * FROM origens WHERE nome = ?", (nome_origem,)) as cursor:
+                self.df['origem_data'] = await cursor.fetchone()
         await interaction.response.defer()
 
     @discord.ui.button(label="Próximo Passo ➡️", style=discord.ButtonStyle.success, row=1)
     async def proximo(self, button, interaction):
-        if not self.df['origem_data']:
+        if not self.df.get('origem_data'):
             return await interaction.response.send_message("❌ Selecione uma origem primeiro!", ephemeral=True)
         
-        view = ViewAtributos(self.bot, self.cursor, self.conn, self.df)
+        view = ViewAtributos(self.bot, self.df)
         await interaction.response.edit_message(content=view.gerar_texto(), view=view)
 class ViewAtributos(discord.ui.View):
-    def __init__(self, bot, cursor, conn, dados_ficha):
+    def __init__(self, bot, dados_ficha):
         super().__init__(timeout=600)
-        self.bot, self.cursor, self.conn, self.df = bot, cursor, conn, dados_ficha
+        self.bot, self.df = bot, dados_ficha
         self.total = 0
 
         opcoes = [
@@ -292,18 +294,20 @@ class ViewAtributos(discord.ui.View):
     async def proximo(self, button, interaction):
         if self.total < 3:
             return await interaction.response.send_message("❌ Distribua todos os 3 pontos!", ephemeral=True)
-        view = ViewAptidao(self.bot, self.cursor, self.conn, self.df)
+            
+        async with aiosqlite.connect('escola.db') as db:
+            async with db.execute("SELECT nome FROM biblioteca WHERE tipo = 'Aptidão'") as cursor:
+                aptidoes = await cursor.fetchall()
+                
+        view = ViewAptidao(self.bot, self.df, aptidoes)
         await interaction.response.edit_message(content=f"✨ Criação de **{self.df['nome']}**\n\n**Passo 4:** Escolha 2 Aptidões da biblioteca.", view=view)
 class ViewAptidao(discord.ui.View):
-    def __init__(self, bot, cursor, conn, dados_ficha):
+    def __init__(self, bot, dados_ficha, aptidoes):
         super().__init__(timeout=600)
-        self.bot, self.cursor, self.conn, self.df = bot, cursor, conn, dados_ficha
+        self.bot, self.df = bot, dados_ficha
         
         self.df['aptidoes'] = [] 
         self.tem_aptidoes = False
-
-        self.cursor.execute("SELECT nome FROM biblioteca WHERE tipo = 'Aptidão'")
-        aptidoes = self.cursor.fetchall()
 
         if aptidoes and len(aptidoes) >= 2:
             self.tem_aptidoes = True
@@ -319,34 +323,38 @@ class ViewAptidao(discord.ui.View):
     @discord.ui.button(label="Próximo Passo ➡️", style=discord.ButtonStyle.success, row=1)
     async def finalizar(self, button, interaction):
         attr_b = self.df['origem_data'][4]
-        coracao = 3 + (3 if attr_b == "corpo" else 0) + self.df['pontos']['corpo']
+        
+        corpo = 3 + (3 if attr_b == "corpo" else 0) + self.df['pontos']['corpo']
         mente = 3 + (3 if attr_b == "mente" else 0) + self.df['pontos']['mente']
-        corpo = 3 + (3 if attr_b == "coracao" else 0) + self.df['pontos']['coracao']
+        coracao = 3 + (3 if attr_b == "coracao" else 0) + self.df['pontos']['coracao']
 
         attr_folego = self.df['atributo_folego']
-        valor_base = coracao if attr_folego == 'corpo' else (mente if attr_folego == 'mente' else corpo)
+        valor_base = corpo if attr_folego == 'corpo' else (mente if attr_folego == 'mente' else coracao)
         folego_maximo = 100 + (valor_base * 10)
 
         aptidoes_escolhidas = self.df.get('aptidoes', [])
         fichas_aptidao = 2 - len(aptidoes_escolhidas)
         fichas_habilidade = 3
         
-        self.cursor.execute('''
-            INSERT INTO alunos (nome_personagem, owner_id, origem, corpo, mente, coracao, 
-                                atributo_folego, folego_treino, folego_atual, 
-                                fichas_habilidade, fichas_aptidao) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (self.df['nome'], self.df['alvo'].id, self.df['origem_data'][1], corpo, mente, coracao, 
-              attr_folego, 0, folego_maximo, fichas_habilidade, fichas_aptidao))
-        aluno_id = self.cursor.lastrowid
+        async with aiosqlite.connect('escola.db') as db:
+            await db.execute('''
+                INSERT INTO alunos (nome_personagem, owner_id, origem, corpo, mente, coracao, 
+                                    atributo_folego, folego_treino, folego_atual, 
+                                    fichas_habilidade, fichas_aptidao) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (self.df['nome'], self.df['alvo'].id, self.df['origem_data'][1], corpo, mente, coracao, 
+                  attr_folego, 0, folego_maximo, fichas_habilidade, fichas_aptidao))
+            
+            async with db.execute("SELECT last_insert_rowid()") as cursor:
+                aluno_id = (await cursor.fetchone())[0]
 
-        for a in aptidoes_escolhidas:
-            self.cursor.execute("SELECT id FROM biblioteca WHERE nome = ?", (a,))
-            aid = self.cursor.fetchone()
-            if aid: 
-                self.cursor.execute("INSERT INTO posses (aluno_id, conhecimento_id) VALUES (?, ?)", (aluno_id, aid[0]))
+            for a in aptidoes_escolhidas:
+                async with db.execute("SELECT id FROM biblioteca WHERE nome = ?", (a,)) as cursor:
+                    aid = await cursor.fetchone()
+                if aid: 
+                    await db.execute("INSERT INTO posses (aluno_id, conhecimento_id) VALUES (?, ?)", (aluno_id, aid[0]))
 
-        self.conn.commit()
+            await db.commit()
 
         msg_final = f"🎉 A ficha de **{self.df['nome']}** foi finalizada com sucesso!\n\n"
         msg_final += f"*(Você tem **{fichas_habilidade} Ficha(s) de Habilidade**"
@@ -360,60 +368,57 @@ class ViewAptidao(discord.ui.View):
 class Cadastro(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.conn = sqlite3.connect('escola.db')
-        self.cursor = self.conn.cursor()
 
-        self.cursor.execute(''' 
-            CREATE TABLE IF NOT EXISTS alunos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                nome_personagem TEXT,
-                owner_id INTEGER,
-                origem TEXT,
-                corpo INTEGER DEFAULT 3,
-                mente INTEGER DEFAULT 3,
-                coracao INTEGER DEFAULT 3,
-                estrelas INTEGER DEFAULT 0,
-                atributo_folego TEXT,
-                folego_treino INTEGER DEFAULT 0,
-                folego_atual INTEGER DEFAULT 100,
-                fichas_habilidade INTEGER DEFAULT 3,
-                fichas_aptidao INTEGER DEFAULT 0
-            )
-        ''')
-        
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS biblioteca (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                nome TEXT UNIQUE,
-                descricao TEXT,
-                tipo TEXT,
-                custo INTEGER,
-                custo_folego INTEGER DEFAULT 0
-            )
-        ''')
-
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS posses (
-                aluno_id INTEGER,
-                conhecimento_id INTEGER,
-                FOREIGN KEY(aluno_id) REFERENCES alunos(id),
-                FOREIGN KEY(conhecimento_id) REFERENCES biblioteca(id)
-            )
-        ''')
-
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS origens (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                nome TEXT UNIQUE,
-                descricao TEXT,
-                categoria TEXT,
-                atributo_bonus TEXT
-            )
-        ''')
-        self.conn.commit()
+    @commands.Cog.listener()
+    async def on_ready(self):
+        async with aiosqlite.connect('escola.db') as db:
+            await db.execute(''' 
+                CREATE TABLE IF NOT EXISTS alunos (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    nome_personagem TEXT,
+                    owner_id INTEGER,
+                    origem TEXT,
+                    corpo INTEGER DEFAULT 3,
+                    mente INTEGER DEFAULT 3,
+                    coracao INTEGER DEFAULT 3,
+                    estrelas INTEGER DEFAULT 0,
+                    atributo_folego TEXT,
+                    folego_treino INTEGER DEFAULT 0,
+                    folego_atual INTEGER DEFAULT 100,
+                    fichas_habilidade INTEGER DEFAULT 3,
+                    fichas_aptidao INTEGER DEFAULT 0
+                )
+            ''')
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS biblioteca (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    nome TEXT UNIQUE,
+                    descricao TEXT,
+                    tipo TEXT,
+                    custo INTEGER,
+                    custo_folego INTEGER DEFAULT 0
+                )
+            ''')
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS posses (
+                    aluno_id INTEGER,
+                    conhecimento_id INTEGER,
+                    FOREIGN KEY(aluno_id) REFERENCES alunos(id),
+                    FOREIGN KEY(conhecimento_id) REFERENCES biblioteca(id)
+                )
+            ''')
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS origens (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    nome TEXT UNIQUE,
+                    descricao TEXT,
+                    categoria TEXT,
+                    atributo_bonus TEXT
+                )
+            ''')
+            await db.commit()
 
     @discord.slash_command(name="criar_personagem", description="Registra um personagem e seu player")
-    @commands.has_permissions(administrator=True)
     async def criar_personagem(
         self, ctx, 
         usuario: discord.Member = discord.Option(discord.Member, description="Dono da ficha", default=None)
@@ -426,35 +431,34 @@ class Cadastro(commands.Cog):
             alvo = usuario
 
         if not ctx.author.guild_permissions.administrator:
-            self.cursor.execute("SELECT COUNT(*) FROM alunos WHERE owner_id = ?", (alvo.id,))
-            count = self.cursor.fetchone()[0]
+            async with aiosqlite.connect('escola.db') as db:
+                async with db.execute("SELECT COUNT(*) FROM alunos WHERE owner_id = ?", (alvo.id,)) as cursor:
+                    count = (await cursor.fetchone())[0]
             if count >= 2:
                 return await ctx.respond("❌ Você já atingiu o limite de 2 personagens!", ephemeral=True)
 
-        modal = ModalNome(self.bot, self.cursor, self.conn, alvo)
+        modal = ModalNome(self.bot, alvo)
         await ctx.send_modal(modal)
     
     @discord.slash_command(name="deletar_personagem", description="[ADM] Remove uma ficha permanentemente")
-    @commands.has_permissions(administrator=True)
     async def deletar_personagem(self, ctx, id_ficha: int):
-        self.cursor.execute('SELECT nome_personagem FROM alunos WHERE id = ?', (id_ficha,))
-        personagem = self.cursor.fetchone()
+        async with aiosqlite.connect('escola.db') as db:
+            async with db.execute('SELECT nome_personagem FROM alunos WHERE id = ?', (id_ficha,)) as cursor:
+                personagem = await cursor.fetchone()
 
-        if not personagem:
-            return await ctx.respond(f"❌ Nenhuma ficha encontrada com o ID `#{id_ficha}`.", ephemeral=True)
+            if not personagem:
+                return await ctx.respond(f"❌ Nenhuma ficha encontrada com o ID `#{id_ficha}`.", ephemeral=True)
 
-        nome_char = personagem[0]
+            nome_char = personagem[0]
 
-        try:
-            self.cursor.execute('DELETE FROM alunos WHERE id = ?', (id_ficha,))
-            
-            self.cursor.execute('DELETE FROM posses WHERE aluno_id = ?', (id_ficha,))
-            
-            self.conn.commit()
-            
-            await ctx.respond(f"🗑️ A ficha de **{nome_char}** (ID `#{id_ficha}`) foi deletada com sucesso!")
-        except Exception as e:
-            await ctx.respond(f"❌ Erro ao deletar do banco de dados: {e}", ephemeral=True)
+            try:
+                await db.execute('DELETE FROM alunos WHERE id = ?', (id_ficha,))
+                await db.execute('DELETE FROM posses WHERE aluno_id = ?', (id_ficha,))
+                await db.commit()
+                
+                await ctx.respond(f"🗑️ A ficha de **{nome_char}** (ID `#{id_ficha}`) foi deletada com sucesso!")
+            except Exception as e:
+                await ctx.respond(f"❌ Erro ao deletar do banco de dados: {e}", ephemeral=True)
 
    
     @discord.slash_command(name="ficha", description="Mostra o personagem do usuário")
@@ -464,13 +468,15 @@ class Cadastro(commands.Cog):
         if target.id != ctx.author.id and not ctx.author.guild_permissions.administrator:
             return await ctx.respond("❌ Você não tem permissão para ver o perfil de outros alunos! Use somente */ficha*", ephemeral=True)
         
-        self.cursor.execute('SELECT * FROM alunos WHERE owner_id = ?', (target.id,))
-        resultados = self.cursor.fetchall()
+        async with aiosqlite.connect('escola.db') as db:
+            async with db.execute('SELECT * FROM alunos WHERE owner_id = ?', (target.id,)) as cursor:
+                resultados = await cursor.fetchall()
         
         if not resultados:
             return await ctx.respond(f"❓ {target.display_name} não possui personagens cadastrados.", ephemeral=True)
 
-        view = PaginaPerfil(resultados, target, self.cursor)
+        view = PaginaPerfil(resultados, target)
+        await view.carregar_conhecimentos()
         await ctx.respond(embed=view.gerar_embed(), view=view, ephemeral=True)
     
 def setup(bot):
